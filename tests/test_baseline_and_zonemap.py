@@ -9,6 +9,16 @@ from glassmelt.config import default_config
 from glassmelt.errors import InterlockError, SequenceError
 
 
+def _cullet(platform):
+    """按额定工况出一版掺配决策，供配比计算使用。"""
+
+    return platform.cullet.decide(
+        platform.config.cullet.pull_rated_tpd,
+        platform.config.cullet.yard_target_t,
+        platform.config.cullet.inbound_default_tpd,
+    )
+
+
 def test_scale_baseline_is_persisted(platform):
     assert platform.scale.is_durable() is False
     baseline = platform.scale.recalibrate(5.0, platform.clock.now())
@@ -28,16 +38,17 @@ def test_scale_offset_beyond_limit_is_rejected(platform):
 
 
 def test_mix_plan_uses_the_current_baseline(platform):
+    cullet = _cullet(platform)
     old = platform.scale.baseline()
     epoch_before = platform.scale.epoch
-    stale_plan = platform.mix.plan(old)
-    assert platform.mix.matches(stale_plan, platform.scale.baseline()) is True
+    stale_plan = platform.mix.plan(old, cullet)
+    assert platform.mix.matches(stale_plan, platform.scale.baseline(), cullet) is True
     platform.recalibrate_scale(6.0)
     fresh = platform.scale.baseline()
-    fresh_plan = platform.mix.plan(fresh)
+    fresh_plan = platform.mix.plan(fresh, platform.cullet.current())
     assert fresh_plan.baseline_epoch == epoch_before + 1
-    assert platform.mix.matches(stale_plan, fresh) is False
-    assert platform.mix.matches(fresh_plan, fresh) is True
+    assert platform.mix.matches(stale_plan, fresh, platform.cullet.current()) is False
+    assert platform.mix.matches(fresh_plan, fresh, platform.cullet.current()) is True
     assert fresh_plan.mix_total_kg == pytest.approx(
         platform.config.batch.charge_batch_kg + 6.0
     )
@@ -51,10 +62,11 @@ def test_recalibration_probe_reports_the_fresh_plan(platform):
 
 
 def test_mix_planner_tolerance_flag(platform):
-    plan = platform.mix.plan(platform.scale.baseline())
+    cullet = _cullet(platform)
+    plan = platform.mix.plan(platform.scale.baseline(), cullet)
     assert platform.mix.tolerance_ok(plan) is True
     platform.scale.recalibrate(platform.config.batch.scale_offset_max_kg, platform.clock.now())
-    wide = platform.mix.plan(platform.scale.baseline())
+    wide = platform.mix.plan(platform.scale.baseline(), platform.cullet.current())
     assert wide.deviation_pct > platform.config.batch.mix_tolerance_pct
     assert platform.mix.tolerance_ok(wide) is False
 

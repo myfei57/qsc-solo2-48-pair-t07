@@ -124,6 +124,19 @@ class ConsoleAPI:
         offset = float(payload.get("offset_kg", 0.0))
         return self._guard(lambda: self.platform.recalibrate_scale(offset))
 
+    def decide_cullet(self, payload: dict) -> dict:
+        def _num(key: str) -> float | None:
+            value = payload.get(key)
+            return None if value is None else float(value)
+
+        return self._guard(
+            lambda: self.platform.decide_cullet(
+                pull_tpd=_num("pull_tpd"),
+                yard_t=_num("yard_t"),
+                inbound_tpd=_num("inbound_tpd"),
+            )
+        )
+
     def keep_alive(self, payload: dict) -> dict:
         """推进一个控制周期；缺省工况按 85% 熔制负荷取。"""
 

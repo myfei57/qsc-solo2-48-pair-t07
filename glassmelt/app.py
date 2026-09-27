@@ -1,9 +1,10 @@
 """平台装配与控制循环。
 
 ``Platform`` 把各组件按真实调用链接起来，并暴露四件事：启动
-顺序、停炉顺序、控制循环和状态快照。控制循环每个周期做六件事：按负荷与
-拉引量调整液面并按液面门控投料、按投料秤基线折算配比、维持燃烧与分区、
-按稳温结论决定闸板、走一遍成型循环、最后按退火曲线结算网带与加热功率。
+顺序、停炉顺序、控制循环和状态快照。控制循环每个周期做七件事：按负荷与
+拉引量调整液面并按液面门控投料、按库存与热态窗口决策碎玻璃掺配、按投料秤
+基线与掺配决策折算配比、维持燃烧与分区、按稳温结论决定闸板、走一遍成型
+循环、最后按退火曲线结算网带与加热功率。
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from .audit.log import AuditLog
 from .audit.record import AuditRecord
 from .batch.charge import Charger
+from .batch.cullet import CulletPlanner
 from .batch.scale import BatchScale
 from .burner.air import CombustionAir
 from .burner.draft import air_closed_before_draft_stop, close_combustion_air
@@ -58,6 +60,7 @@ START_ORDER_RULES: tuple[tuple[str, str, str], ...] = (
     ("draft_start", "ignite", "炉膛负压必须先于点火建立"),
     ("air_establish", "ignite", "助燃风必须先于燃气投入"),
     ("scale_baseline", "mix_plan", "投料秤基线必须先于配比折算"),
+    ("cullet_decide", "mix_plan", "掺配决策必须先于配比折算"),
     ("charge", "mix_plan", "投料后才有本批配比"),
     ("stability_warm", "gate_open", "料道稳温必须先于开闸板"),
     ("gate_open", "gob_form", "开闸板后料滴才流出"),
@@ -77,6 +80,7 @@ STEP_COMPONENT: dict[str, str] = {
     "air_establish": "burner",
     "ignite": "burner",
     "scale_baseline": "batch",
+    "cullet_decide": "batch",
     "charge": "batch",
     "mix_plan": "furnace",
     "stability_warm": "temp",
@@ -149,6 +153,12 @@ class Platform:
 
         self.scale = BatchScale(self.bus, store, self.config.batch)
         self.charger = Charger(self.bus, self.config.batch)
+        self.cullet = CulletPlanner(
+            self.bus, self.clock, self.config.cullet, self.config.burner
+        )
+        self._yard_t = self.config.cullet.yard_target_t
+        self._inbound_tpd = self.config.cullet.inbound_default_tpd
+        self._last_pull_tpd = self.config.cullet.pull_rated_tpd
 
         self.stability = StabilityMonitor(self.clock, self.bus, self.config.forehearth)
         self.forehearth_temp = ForehearthSteady(self.bus, self.config.forehearth)
@@ -184,6 +194,7 @@ class Platform:
         for area, device, kind in (
             ("batch", "charger", "batch-charger"),
             ("batch", "scale", "batch-scale"),
+            ("batch", "cullet", "cullet-planner"),
             ("furnace", "level", "glass-level-probe"),
             ("furnace", "melt_temp", "thermocouple"),
             ("furnace", "draft", "draft-fan"),
@@ -248,16 +259,25 @@ class Platform:
             self.scale.require_durable()
             self._note(steps, "scale_baseline", epoch=self.scale.epoch)
 
+            cullet = self._ensure_cullet_decision()
+            self._note(
+                steps,
+                "cullet_decide",
+                epoch=cullet.epoch,
+                ratio=round(cullet.ratio, 4),
+            )
+
             self.level.observe(self.config.furnace.level_target_mm - 24.0)
             charge = self.charger.start(self.level)
             self.level.drift(18.0)
             self._note(steps, "charge", batch_kg=round(charge.batch_kg, 3))
 
-            plan = self.mix.plan(self.scale.baseline())
+            plan = self.mix.plan(self.scale.baseline(), cullet)
             self._note(
                 steps,
                 "mix_plan",
                 baseline_epoch=plan.baseline_epoch,
+                cullet_epoch=plan.cullet_epoch,
                 deviation_pct=round(plan.deviation_pct, 4),
             )
 
@@ -330,7 +350,20 @@ class Platform:
                 charge_kg = charge.batch_kg
                 self.level.drift(9.0 * state.dt)
 
-            plan = self.mix.plan(self.scale.baseline())
+            pull_tpd = state.pull_rate * self.config.cullet.pull_rated_tpd
+            self._last_pull_tpd = pull_tpd
+            cullet = self.cullet.decide(pull_tpd, self._yard_t, self._inbound_tpd)
+            self._yard_t = max(
+                0.0,
+                self._yard_t
+                + (
+                    self._inbound_tpd * self.config.cullet.wash_yield
+                    - cullet.ratio * pull_tpd
+                )
+                * state.dt
+                / 86400.0,
+            )
+            plan = self.mix.plan(self.scale.baseline(), cullet)
             forehearth_c = self.forehearth_temp.setpoint_c - 3.0 * (1.0 - state.load)
             self.forehearth_temp.observe(forehearth_c)
             stability = self.stability.observe(forehearth_c)
@@ -347,6 +380,7 @@ class Platform:
 
             self.trend.append("melt_temp", moment, self.furnace_temp.temperature_c)
             self.trend.append("level_mm", moment, self.level.level_mm)
+            self.trend.append("cullet_ratio", moment, cullet.ratio)
             self.trend.append("forehearth_temp", moment, self.forehearth_temp.temperature_c)
             self.trend.append("gob_mass_g", moment, gob.mass_g)
             self.trend.append("belt_speed", moment, anneal["belt"]["speed_m_per_min"])
@@ -363,6 +397,7 @@ class Platform:
                     "total_kg": round(self.charger.charged_kg, 3),
                 },
                 "mix": plan.as_dict(),
+                "cullet": cullet.as_dict(),
                 "stability": stability.as_dict(),
                 "gate": self.gate.snapshot(),
                 "gob": gob.as_dict(),
@@ -482,11 +517,52 @@ class Platform:
 
         with self._lock:
             baseline = self.scale.recalibrate(offset_kg, self.clock.now())
-            plan = self.mix.plan(self.scale.baseline())
+            plan = self.mix.plan(self.scale.baseline(), self._ensure_cullet_decision())
             return {
                 "baseline": baseline.as_dict(),
                 "plan": plan.as_dict(),
-                "fresh": self.mix.matches(plan, self.scale.baseline()),
+                "fresh": self.mix.matches(
+                    plan, self.scale.baseline(), self.cullet.current()
+                ),
+            }
+
+    def _ensure_cullet_decision(self):
+        """返回最新掺配决策；还没有就按当前工况先出一版。"""
+
+        decision = self.cullet.current()
+        if decision is None:
+            decision = self.cullet.decide(
+                self._last_pull_tpd, self._yard_t, self._inbound_tpd
+            )
+        return decision
+
+    def decide_cullet(
+        self,
+        pull_tpd: float | None = None,
+        yard_t: float | None = None,
+        inbound_tpd: float | None = None,
+    ) -> dict:
+        """按给定工况做一版掺配决策；缺省工况沿用平台当前状态。
+
+        返回决策本身与决策点的窑温校核结论；越限收回时原因在
+        ``decision.reasons`` 里，需要人工处置的情形在 ``decision.alarms`` 里。
+        """
+
+        with self._lock:
+            if yard_t is not None:
+                self._yard_t = float(yard_t)
+            if inbound_tpd is not None:
+                self._inbound_tpd = float(inbound_tpd)
+            if pull_tpd is not None:
+                self._last_pull_tpd = float(pull_tpd)
+            decision = self.cullet.decide(
+                self._last_pull_tpd, self._yard_t, self._inbound_tpd
+            )
+            return {
+                "decision": decision.as_dict(),
+                "check": self.cullet.check(decision.pull_tpd, decision.ratio),
+                "yard_t": round(self._yard_t, 1),
+                "inbound_tpd": round(self._inbound_tpd, 2),
             }
 
     def rebuild_zone_map(self, assignments: dict, reason: str = "窑体大修") -> dict:
@@ -577,6 +653,7 @@ class Platform:
             "started": self._started,
             "level": self.level.snapshot(),
             "scale_durable": self.scale.is_durable(),
+            "cullet_decided": self.cullet.current() is not None,
             "draft_negative": self.draft.is_negative(),
             "air_established": self.air.is_established(),
             "melt_temp_ok": self.furnace_temp.is_ok(),
@@ -636,6 +713,7 @@ class Platform:
                 "/api/mold/blow",
                 "/api/lehr/reset",
                 "/api/scale/calibrate",
+                "/api/cullet/decide",
                 "/api/furnace/clear",
                 "/api/furnace/rebuild",
                 "/api/cycle",
@@ -678,6 +756,12 @@ class Platform:
             "trip": self.trip.snapshot(),
             "scale": self.scale.snapshot(),
             "charger": self.charger.snapshot(),
+            "cullet": {
+                **self.cullet.snapshot(),
+                "yard_t": round(self._yard_t, 1),
+                "inbound_tpd": round(self._inbound_tpd, 2),
+                "last_pull_tpd": round(self._last_pull_tpd, 3),
+            },
             "stability": self.stability.snapshot(),
             "forehearth": self.forehearth_temp.snapshot(),
             "gate": self.gate.snapshot(),
@@ -728,6 +812,7 @@ def build_platform(
             mold=effective.mold,
             lehr=effective.lehr,
             batch=effective.batch,
+            cullet=effective.cullet,
             pages=effective.pages,
         )
     return Platform(config=effective, clock=clock, unit=unit)

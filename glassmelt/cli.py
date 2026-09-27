@@ -4,8 +4,8 @@
 
 ``serve``   启动控制台 HTTP 服务，可选地在启动后探测页面；
 ``demo``    在本地跑一遍完整流程（启动顺序 → 控制周期 → 投料恢复 → 点火 →
-            分区大修与跳闸 → 秤标定 → 清炉 → 退火复位 → 停炉顺序），用于
-            交付前的真实运行检查；
+            分区大修与跳闸 → 秤标定 → 碎玻璃掺配决策与收回 → 清炉 →
+            退火复位 → 停炉顺序），用于交付前的真实运行检查；
 ``status``  打印当前状态快照；
 ``config``  打印生效配置；
 ``reset``   清掉落盘的投料秤标定基线。
@@ -93,6 +93,15 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     trip = platform.trip_burner("zone-3", "演示用窑温越限")
     trip_reset = platform.reset_trip()
     calibration = platform.recalibrate_scale(4.5)
+    # 回收料多、拉引量偏低：堆场期望掺配率会顶到热态上限之外，决策应自动收回。
+    cullet_rollback = platform.decide_cullet(
+        pull_tpd=60.0, yard_t=1600.0, inbound_tpd=40.0
+    )
+    cullet_restore = platform.decide_cullet(
+        pull_tpd=config.cullet.pull_rated_tpd,
+        yard_t=config.cullet.yard_target_t,
+        inbound_tpd=config.cullet.inbound_default_tpd,
+    )
     cleared = platform.clear_furnace("演示用出料")
     platform.level.observe(config.furnace.level_target_mm - 18.0)
     restored = platform.start_charging(path="resume")
@@ -115,6 +124,8 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "trip": trip,
         "trip_reset": trip_reset,
         "calibration": calibration,
+        "cullet_rollback": cullet_rollback,
+        "cullet_restore": cullet_restore,
         "cleared": cleared,
         "charged_after_clear": restored,
         "anneal_excursion": anneal_excursion,

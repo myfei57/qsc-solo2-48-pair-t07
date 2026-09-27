@@ -2,8 +2,8 @@
 
 配置来自 YAML（由 vendored PyYAML 解析），覆盖玻璃液面带、熔化温度区间、
 助燃风与燃气上限、供料道稳温带与保持时间、退火告警阈值、料滴质量公差、
-合模力下限、网带快慢速与投料秤标定范围。任何缺失或越界取值都在装配阶段
-抛出 :class:`ConfigError`，不允许带着半份配置启动控制链。
+合模力下限、网带快慢速、投料秤标定范围与碎玻璃掺配约束。任何缺失或越界
+取值都在装配阶段抛出 :class:`ConfigError`，不允许带着半份配置启动控制链。
 """
 
 from __future__ import annotations
@@ -327,6 +327,58 @@ class BatchLimits:
 
 
 @dataclass(frozen=True)
+class CulletLimits:
+    """碎玻璃掺配与堆场约束。"""
+
+    pull_rated_tpd: float
+    yard_capacity_t: float
+    yard_target_t: float
+    yard_min_t: float
+    inbound_default_tpd: float
+    adjust_days: float
+    wash_yield: float
+    ratio_quality_max: float
+    se_batch_kj_kg: float
+    se_cullet_kj_kg: float
+    gas_lhv_kj_m3: float
+    gas_min_stable_m3_h: float
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "CulletLimits":
+        limits = cls(
+            pull_rated_tpd=_number(section, "pull_rated_tpd", minimum=0.0),
+            yard_capacity_t=_number(section, "yard_capacity_t", minimum=0.0),
+            yard_target_t=_number(section, "yard_target_t", minimum=0.0),
+            yard_min_t=_number(section, "yard_min_t", minimum=0.0),
+            inbound_default_tpd=_number(section, "inbound_default_tpd", minimum=0.0),
+            adjust_days=_number(section, "adjust_days", minimum=0.0),
+            wash_yield=_number(section, "wash_yield", minimum=0.0),
+            ratio_quality_max=_number(section, "ratio_quality_max", minimum=0.0),
+            se_batch_kj_kg=_number(section, "se_batch_kj_kg", minimum=0.0),
+            se_cullet_kj_kg=_number(section, "se_cullet_kj_kg", minimum=0.0),
+            gas_lhv_kj_m3=_number(section, "gas_lhv_kj_m3", minimum=0.0),
+            gas_min_stable_m3_h=_number(section, "gas_min_stable_m3_h", minimum=0.0),
+        )
+        if not limits.yard_min_t < limits.yard_target_t < limits.yard_capacity_t:
+            raise ConfigError("堆场库存必须满足 下限 < 目标 < 容量", component="config")
+        if not 0.0 < limits.wash_yield <= 1.0:
+            raise ConfigError("碎玻璃清洗得率必须落在 (0, 1]", component="config")
+        if not 0.0 < limits.ratio_quality_max <= 1.0:
+            raise ConfigError("掺配质量上限必须落在 (0, 1]", component="config")
+        if not limits.se_cullet_kj_kg < limits.se_batch_kj_kg:
+            raise ConfigError("全碎玻璃单耗必须低于全生料单耗", component="config")
+        if limits.adjust_days <= 0:
+            raise ConfigError("库存调节周期必须为正", component="config")
+        if limits.pull_rated_tpd <= 0:
+            raise ConfigError("额定拉引量必须为正", component="config")
+        if limits.gas_lhv_kj_m3 <= 0:
+            raise ConfigError("燃气低位热值必须为正", component="config")
+        if limits.gas_min_stable_m3_h <= 0:
+            raise ConfigError("最低稳定燃烧负荷必须为正", component="config")
+        return limits
+
+
+@dataclass(frozen=True)
 class PlatformConfig:
     """一份完整的平台配置。"""
 
@@ -341,6 +393,7 @@ class PlatformConfig:
     mold: MoldLimits
     lehr: LehrLimits
     batch: BatchLimits
+    cullet: CulletLimits
     pages: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
@@ -376,6 +429,7 @@ class PlatformConfig:
             mold=MoldLimits.from_mapping(_section(limits, "mold")),
             lehr=LehrLimits.from_mapping(_section(limits, "lehr")),
             batch=BatchLimits.from_mapping(_section(limits, "batch")),
+            cullet=CulletLimits.from_mapping(_section(limits, "cullet")),
             pages=tuple(pages),
         )
 
@@ -451,6 +505,20 @@ def default_config() -> PlatformConfig:
             mix_tolerance_pct=1.5,
             charge_window_s=180.0,
         ),
+        cullet=CulletLimits(
+            pull_rated_tpd=72.0,
+            yard_capacity_t=3000.0,
+            yard_target_t=1500.0,
+            yard_min_t=500.0,
+            inbound_default_tpd=25.0,
+            adjust_days=10.0,
+            wash_yield=0.97,
+            ratio_quality_max=0.6,
+            se_batch_kj_kg=7800.0,
+            se_cullet_kj_kg=5400.0,
+            gas_lhv_kj_m3=35500.0,
+            gas_min_stable_m3_h=455.0,
+        ),
         pages=("overview", "operations", "records"),
     )
 
@@ -516,6 +584,20 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "scale_offset_max_kg": cfg.batch.scale_offset_max_kg,
                 "mix_tolerance_pct": cfg.batch.mix_tolerance_pct,
                 "charge_window_s": cfg.batch.charge_window_s,
+            },
+            "cullet": {
+                "pull_rated_tpd": cfg.cullet.pull_rated_tpd,
+                "yard_capacity_t": cfg.cullet.yard_capacity_t,
+                "yard_target_t": cfg.cullet.yard_target_t,
+                "yard_min_t": cfg.cullet.yard_min_t,
+                "inbound_default_tpd": cfg.cullet.inbound_default_tpd,
+                "adjust_days": cfg.cullet.adjust_days,
+                "wash_yield": cfg.cullet.wash_yield,
+                "ratio_quality_max": cfg.cullet.ratio_quality_max,
+                "se_batch_kj_kg": cfg.cullet.se_batch_kj_kg,
+                "se_cullet_kj_kg": cfg.cullet.se_cullet_kj_kg,
+                "gas_lhv_kj_m3": cfg.cullet.gas_lhv_kj_m3,
+                "gas_min_stable_m3_h": cfg.cullet.gas_min_stable_m3_h,
             },
         },
         "pages": list(cfg.pages),

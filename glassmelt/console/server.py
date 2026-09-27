@@ -117,6 +117,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(self.api.release_ignition_latch(payload))
             elif parsed.path == "/api/scale/calibrate":
                 self._send_json(self.api.calibrate(payload))
+            elif parsed.path == "/api/cullet/plan":
+                self._send_json(self.api.plan_cullet(payload))
             elif parsed.path == "/api/cycle":
                 self._send_json(self.api.keep_alive(payload))
             elif parsed.path == "/api/start":

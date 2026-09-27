@@ -71,6 +71,16 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     platform.scale.restore()
 
     startup = platform.start()
+    # 演示掺配决策：回收料充足时物料侧会想冲高比例，窑温校核兜不住就自动收回。
+    cullet = platform.plan_cullet(
+        {
+            "inventory_t": 3000.0,
+            "incoming_tpd": 200.0,
+            "grade": "A",
+            "moisture": 0.01,
+            "contamination": 0.01,
+        }
+    )
     cycles = [
         platform.cycle(
             CycleInputs(
@@ -107,6 +117,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
 
     report = {
         "startup": startup,
+        "cullet": cullet,
         "cycles_run": len(cycles),
         "last_cycle": cycles[-1] if cycles else None,
         "resume": resume,

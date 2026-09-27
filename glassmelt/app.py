@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from .audit.log import AuditLog
 from .audit.record import AuditRecord
 from .batch.charge import Charger
+from .batch.cullet import CulletPlanner, CulletSupply
 from .batch.scale import BatchScale
 from .burner.air import CombustionAir
 from .burner.draft import air_closed_before_draft_stop, close_combustion_air
@@ -149,6 +150,7 @@ class Platform:
 
         self.scale = BatchScale(self.bus, store, self.config.batch)
         self.charger = Charger(self.bus, self.config.batch)
+        self.cullet = CulletPlanner(self.bus, self.config.cullet, self.config.furnace)
 
         self.stability = StabilityMonitor(self.clock, self.bus, self.config.forehearth)
         self.forehearth_temp = ForehearthSteady(self.bus, self.config.forehearth)
@@ -253,7 +255,9 @@ class Platform:
             self.level.drift(18.0)
             self._note(steps, "charge", batch_kg=round(charge.batch_kg, 3))
 
-            plan = self.mix.plan(self.scale.baseline())
+            plan = self.mix.plan(
+                self.scale.baseline(), cullet_ratio_pct=self.cullet.ratio_pct
+            )
             self._note(
                 steps,
                 "mix_plan",
@@ -330,7 +334,9 @@ class Platform:
                 charge_kg = charge.batch_kg
                 self.level.drift(9.0 * state.dt)
 
-            plan = self.mix.plan(self.scale.baseline())
+            plan = self.mix.plan(
+                self.scale.baseline(), cullet_ratio_pct=self.cullet.ratio_pct
+            )
             forehearth_c = self.forehearth_temp.setpoint_c - 3.0 * (1.0 - state.load)
             self.forehearth_temp.observe(forehearth_c)
             stability = self.stability.observe(forehearth_c)
@@ -482,12 +488,26 @@ class Platform:
 
         with self._lock:
             baseline = self.scale.recalibrate(offset_kg, self.clock.now())
-            plan = self.mix.plan(self.scale.baseline())
+            plan = self.mix.plan(
+                self.scale.baseline(), cullet_ratio_pct=self.cullet.ratio_pct
+            )
             return {
                 "baseline": baseline.as_dict(),
                 "plan": plan.as_dict(),
-                "fresh": self.mix.matches(plan, self.scale.baseline()),
+                "fresh": self.mix.matches(
+                    plan, self.scale.baseline(), cullet_ratio_pct=self.cullet.ratio_pct
+                ),
             }
+
+    def plan_cullet(self, supply: dict) -> dict:
+        """按回收料情况决策熟料比：窑温兜不住自动收回，比例随即进配料计算。"""
+
+        with self._lock:
+            decision = self.cullet.decide(CulletSupply.from_mapping(supply))
+            plan = self.mix.plan(
+                self.scale.baseline(), cullet_ratio_pct=decision.ratio_pct
+            )
+            return {"decision": decision.as_dict(), "mix": plan.as_dict()}
 
     def rebuild_zone_map(self, assignments: dict, reason: str = "窑体大修") -> dict:
         """窑体大修后重建分区映射。"""
@@ -636,6 +656,7 @@ class Platform:
                 "/api/mold/blow",
                 "/api/lehr/reset",
                 "/api/scale/calibrate",
+                "/api/cullet/plan",
                 "/api/furnace/clear",
                 "/api/furnace/rebuild",
                 "/api/cycle",
@@ -678,6 +699,7 @@ class Platform:
             "trip": self.trip.snapshot(),
             "scale": self.scale.snapshot(),
             "charger": self.charger.snapshot(),
+            "cullet": self.cullet.snapshot(),
             "stability": self.stability.snapshot(),
             "forehearth": self.forehearth_temp.snapshot(),
             "gate": self.gate.snapshot(),
@@ -728,6 +750,7 @@ def build_platform(
             mold=effective.mold,
             lehr=effective.lehr,
             batch=effective.batch,
+            cullet=effective.cullet,
             pages=effective.pages,
         )
     return Platform(config=effective, clock=clock, unit=unit)

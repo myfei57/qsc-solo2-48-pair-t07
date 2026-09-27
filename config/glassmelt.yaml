@@ -47,6 +47,25 @@ limits:
     scale_offset_max_kg: 12.0
     mix_tolerance_pct: 1.5
     charge_window_s: 180.0
+  cullet:
+    ratio_min_pct: 10.0
+    ratio_max_pct: 85.0
+    grade_a_max_pct: 80.0
+    grade_b_max_pct: 50.0
+    grade_c_max_pct: 30.0
+    safety_margin_pct: 1.0
+    horizon_days: 7.0
+    pull_tpd: 480.0
+    q_batch_gj_t: 2.68
+    q_cullet_gj_t: 1.30
+    thermal_efficiency: 0.50
+    fixed_loss_gj_h: 8.0
+    fuel_min_gj_h: 75.0
+    fuel_max_gj_h: 125.0
+    ref_ratio_pct: 30.0
+    ref_heat_gj_h: 98.6
+    temp_per_gj: 0.6
+    temp_per_ratio_pct: 0.9
 pages:
   - overview
   - operations

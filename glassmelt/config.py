@@ -327,6 +327,85 @@ class BatchLimits:
 
 
 @dataclass(frozen=True)
+class CulletLimits:
+    """碎玻璃掺配与窑温校核约束。
+
+    熟料比（碎玻璃干基占入炉料的比例）先受工艺边界与回收料质量等级约束，
+    再受热平衡校核：入炉热负荷需求随熟料比线性变化，跌破最低稳定燃烧就是
+    现场说的"窑温压不住"，冲出最大供热就是熔化能力不足。温度估算在参考
+    工况附近线性化，系数要按本窑历史数据标定。
+    """
+
+    ratio_min_pct: float
+    ratio_max_pct: float
+    grade_a_max_pct: float
+    grade_b_max_pct: float
+    grade_c_max_pct: float
+    safety_margin_pct: float
+    horizon_days: float
+    pull_tpd: float
+    q_batch_gj_t: float
+    q_cullet_gj_t: float
+    thermal_efficiency: float
+    fixed_loss_gj_h: float
+    fuel_min_gj_h: float
+    fuel_max_gj_h: float
+    ref_ratio_pct: float
+    ref_heat_gj_h: float
+    temp_per_gj: float
+    temp_per_ratio_pct: float
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "CulletLimits":
+        limits = cls(
+            ratio_min_pct=_number(section, "ratio_min_pct", minimum=0.0),
+            ratio_max_pct=_number(section, "ratio_max_pct", minimum=0.0),
+            grade_a_max_pct=_number(section, "grade_a_max_pct", minimum=0.0),
+            grade_b_max_pct=_number(section, "grade_b_max_pct", minimum=0.0),
+            grade_c_max_pct=_number(section, "grade_c_max_pct", minimum=0.0),
+            safety_margin_pct=_number(section, "safety_margin_pct", minimum=0.0),
+            horizon_days=_number(section, "horizon_days", minimum=0.0),
+            pull_tpd=_number(section, "pull_tpd", minimum=0.0),
+            q_batch_gj_t=_number(section, "q_batch_gj_t", minimum=0.0),
+            q_cullet_gj_t=_number(section, "q_cullet_gj_t", minimum=0.0),
+            thermal_efficiency=_number(section, "thermal_efficiency", minimum=0.0),
+            fixed_loss_gj_h=_number(section, "fixed_loss_gj_h", minimum=0.0),
+            fuel_min_gj_h=_number(section, "fuel_min_gj_h", minimum=0.0),
+            fuel_max_gj_h=_number(section, "fuel_max_gj_h", minimum=0.0),
+            ref_ratio_pct=_number(section, "ref_ratio_pct", minimum=0.0),
+            ref_heat_gj_h=_number(section, "ref_heat_gj_h", minimum=0.0),
+            temp_per_gj=_number(section, "temp_per_gj", minimum=0.0),
+            temp_per_ratio_pct=_number(section, "temp_per_ratio_pct", minimum=0.0),
+        )
+        if not 0.0 < limits.ratio_min_pct < limits.ratio_max_pct <= 100.0:
+            raise ConfigError("熟料比工艺边界必须满足 0 < 下限 < 上限 ≤ 100", component="config")
+        if limits.q_cullet_gj_t >= limits.q_batch_gj_t:
+            raise ConfigError("碎玻璃熔化热必须低于生料熔化热", component="config")
+        if not 0.0 < limits.thermal_efficiency <= 1.0:
+            raise ConfigError("窑炉热效率必须在 (0, 1] 内", component="config")
+        if limits.fuel_min_gj_h >= limits.fuel_max_gj_h:
+            raise ConfigError("燃料能力必须满足 最低稳定燃烧 < 最大供热", component="config")
+        if limits.horizon_days <= 0:
+            raise ConfigError("供应保障天数必须为正", component="config")
+        if limits.safety_margin_pct <= 0:
+            raise ConfigError("回调安全裕量必须为正", component="config")
+        return limits
+
+    def grade_cap(self, grade: str) -> float:
+        """按回收料质量等级取掺配上限（A 本厂同质 / B 外购精选 / C 波动大）。"""
+
+        caps = {
+            "A": self.grade_a_max_pct,
+            "B": self.grade_b_max_pct,
+            "C": self.grade_c_max_pct,
+        }
+        key = str(grade).strip().upper()
+        if key not in caps:
+            raise ConfigError(f"未知的回收料质量等级: {grade!r}", component="config")
+        return caps[key]
+
+
+@dataclass(frozen=True)
 class PlatformConfig:
     """一份完整的平台配置。"""
 
@@ -341,6 +420,7 @@ class PlatformConfig:
     mold: MoldLimits
     lehr: LehrLimits
     batch: BatchLimits
+    cullet: CulletLimits
     pages: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
@@ -376,6 +456,7 @@ class PlatformConfig:
             mold=MoldLimits.from_mapping(_section(limits, "mold")),
             lehr=LehrLimits.from_mapping(_section(limits, "lehr")),
             batch=BatchLimits.from_mapping(_section(limits, "batch")),
+            cullet=CulletLimits.from_mapping(_section(limits, "cullet")),
             pages=tuple(pages),
         )
 
@@ -451,6 +532,26 @@ def default_config() -> PlatformConfig:
             mix_tolerance_pct=1.5,
             charge_window_s=180.0,
         ),
+        cullet=CulletLimits(
+            ratio_min_pct=10.0,
+            ratio_max_pct=85.0,
+            grade_a_max_pct=80.0,
+            grade_b_max_pct=50.0,
+            grade_c_max_pct=30.0,
+            safety_margin_pct=1.0,
+            horizon_days=7.0,
+            pull_tpd=480.0,
+            q_batch_gj_t=2.68,
+            q_cullet_gj_t=1.30,
+            thermal_efficiency=0.50,
+            fixed_loss_gj_h=8.0,
+            fuel_min_gj_h=75.0,
+            fuel_max_gj_h=125.0,
+            ref_ratio_pct=30.0,
+            ref_heat_gj_h=98.6,
+            temp_per_gj=0.6,
+            temp_per_ratio_pct=0.9,
+        ),
         pages=("overview", "operations", "records"),
     )
 
@@ -516,6 +617,26 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "scale_offset_max_kg": cfg.batch.scale_offset_max_kg,
                 "mix_tolerance_pct": cfg.batch.mix_tolerance_pct,
                 "charge_window_s": cfg.batch.charge_window_s,
+            },
+            "cullet": {
+                "ratio_min_pct": cfg.cullet.ratio_min_pct,
+                "ratio_max_pct": cfg.cullet.ratio_max_pct,
+                "grade_a_max_pct": cfg.cullet.grade_a_max_pct,
+                "grade_b_max_pct": cfg.cullet.grade_b_max_pct,
+                "grade_c_max_pct": cfg.cullet.grade_c_max_pct,
+                "safety_margin_pct": cfg.cullet.safety_margin_pct,
+                "horizon_days": cfg.cullet.horizon_days,
+                "pull_tpd": cfg.cullet.pull_tpd,
+                "q_batch_gj_t": cfg.cullet.q_batch_gj_t,
+                "q_cullet_gj_t": cfg.cullet.q_cullet_gj_t,
+                "thermal_efficiency": cfg.cullet.thermal_efficiency,
+                "fixed_loss_gj_h": cfg.cullet.fixed_loss_gj_h,
+                "fuel_min_gj_h": cfg.cullet.fuel_min_gj_h,
+                "fuel_max_gj_h": cfg.cullet.fuel_max_gj_h,
+                "ref_ratio_pct": cfg.cullet.ref_ratio_pct,
+                "ref_heat_gj_h": cfg.cullet.ref_heat_gj_h,
+                "temp_per_gj": cfg.cullet.temp_per_gj,
+                "temp_per_ratio_pct": cfg.cullet.temp_per_ratio_pct,
             },
         },
         "pages": list(cfg.pages),
